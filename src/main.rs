@@ -8,19 +8,47 @@ use std::net::Ipv4Addr;
 use chrono::Duration;
 use uuid::Uuid;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
-//const LOG_LOCATION: &str = "/root/trojan.log.1";
-const LOG_LOCATION: &str = "/Users/xinyuye/github/rust-rotate/trojan.log.1";
+const LOG_LOCATION: &str = "/root/trojan.log.1";
+//const LOG_LOCATION: &str = "/Users/xinyuye/github/rust-rotate/trojan.log.1";
 
 const MERGE_INTERVAL: u32 = 600; //Logs are regrouped into 10min blocks
 
-#[derive(Debug)]
 struct LogGroup{
     date: DateTime<Utc>,
     ips: HashSet<Ipv4Addr>,
     targets: HashMap<String,(u64, u64)>,
 }
 
+impl fmt::Debug for LogGroup{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
+        write!(f, "\ndate: {}, ips: {:?}\n", self.date, self.ips);
+        let mut links: Vec<&String> = self.targets.keys().collect();
+        links.sort_by_key(|&x| self.targets.get(x).unwrap().0);
+        links.reverse();
+        for i in links{
+            let unit: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+            let mut upload_unit = 0_usize;
+            let mut upload = self.targets.get(i).unwrap().0 as f64;
+            while upload >= 1024.0{
+                upload_unit += 1;
+                upload /= 1024.0;
+            }
+            let mut download = self.targets.get(i).unwrap().1 as f64;
+            let mut download_unit = 0_usize;
+            while download >= 1024.0{
+                download_unit+= 1;
+                download /= 1024.0;
+            }
+            let mut temp_str = i.to_string();
+            temp_str.truncate(19);
+            temp_str.push(':');
+            write!(f, "{:<20} up {:>6.2} {}, down {:>6.2} {}\n", temp_str, upload, unit[upload_unit], download, unit[download_unit]);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 struct LogData{
@@ -63,7 +91,7 @@ fn process_file() -> io::Result<()> {
             .unwrap();
         let user = parse_sha224(cap.get(2).unwrap().as_str());
         let ip = cap.get(3).unwrap().as_str().parse::<Ipv4Addr>().unwrap();
-        let target = cap.get(4).unwrap().as_str().to_string();
+        let mut target = cap.get(4).unwrap().as_str().to_string();
         let size = (calculate_size(cap.get(5).unwrap().as_str()), calculate_size(cap.get(6).unwrap().as_str()));
         // let mut log_line = LogData{
         //     date,
@@ -73,6 +101,7 @@ fn process_file() -> io::Result<()> {
         //     size
         // };
         date = merge_date(date);
+        target = group_domain(&target);
         //add log to dict
         if date != last_date{ //dump all records in dict, create new one
             println!("{:?}", buf_dict);
@@ -95,6 +124,14 @@ fn process_file() -> io::Result<()> {
 }
 
 fn group_domain(raw: &str) -> String {
+    if raw.ends_with("126.net")
+    || raw.ends_with("163.com")
+    || raw.ends_with("netease.com"){
+        return "netease".to_string();
+    }
+    if raw.ends_with("bilibili.com"){
+        return "bilibili".to_string();
+    }
     raw.to_string()
 }
 
