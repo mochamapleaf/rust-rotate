@@ -12,6 +12,7 @@ use std::fmt;
 
 const LOG_LOCATION: &str = "/root/trojan.log.1";
 //const LOG_LOCATION: &str = "/Users/xinyuye/github/rust-rotate/trojan.log.1";
+//const LOG_LOCATION: &str = "/home/xinyu/CLionProjects/rust-rotate/trojan.log.1";
 
 const MERGE_INTERVAL: u32 = 600; //Logs are regrouped into 10min blocks
 
@@ -53,7 +54,7 @@ impl fmt::Debug for LogGroup{
 #[derive(Debug)]
 struct LogData{
     date: DateTime<Utc>,
-    user: [u8; 28],
+    user: String,
     ip: Ipv4Addr,
     target: String,
     size: (u64, u64),
@@ -72,27 +73,53 @@ fn process_file() -> io::Result<()> {
     let f = File::open(LOG_LOCATION)?;
     let reader = BufReader::new(f);
     let mut counter = 0_u32;
-    let re = Regex::new(r#"\[INFO\]  (\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) user (\w{56}) from (\d+\.\d+\.\d+\.\d+):\d+ tunneling to ([a-zA-Z.0-9-]+):443 closed sent: ([\d.]+ [KMGP]?i?B) recv: ([\d.]+ [KMGP]?i?B)$"#).unwrap(); //this regexp expression will matchall logs that has bandwidth info.
-    let mut buf_dict = HashMap::<[u8;28],LogGroup>::new();
+    //let re = Regex::new(r#"^\[INFO\]  (\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) user (\w{56}) from (\d+\.\d+\.\d+\.\d+):\d+ tunneling to ([a-zA-Z.0-9-]+):443 closed sent: ([\d.]+ [KMGP]?i?B) recv: ([\d.]+ [KMGP]?i?B)$"#).unwrap(); //this regexp expression will matchall logs that has bandwidth info.
+    let mut buf_dict = HashMap::<String,LogGroup>::new();
     let mut last_date = chrono::MAX_DATETIME;//Matching domains asserts that domain is valid
     for line in reader.lines() {
         //TODO: Redirect warn messages to a separate file
         //filter [WARN] messages, they might contain non utf_8 characters
-        if line.is_err() { continue; }
+        if line.is_err() { continue; }//instead of continue, get the binary data to WARNING log first
         let line_str = line.unwrap();
-        if !line_str.starts_with("[INFO]") || !line_str.ends_with("B"){ continue; }
-        let cap_res = re.captures(&line_str);
-        if cap_res.is_none() {
-            continue;
+        assert!(line_str.is_ascii());
+        if line_str.as_bytes()[28..32] == *b"user"{ //流量数据
+            let (date_str, remaining_str) = line_str.split_at(27);
+            let mut date = Utc
+                .datetime_from_str(date_str.split_at(7).1, "%Y/%m/%d %H:%M:%S")
+                .unwrap();
+            let (user_str, remaining_str) = remaining_str.split_at(62);
+            let user = user_str.split_at(6).1.to_string();
+            let remaining_vec: Vec<&str> = remaining_str.split(' ').collect();
+            let ip = (remaining_vec[2].split_once(':').unwrap().0).parse::<Ipv4Addr>().unwrap();
+            let mut target = (remaining_vec[5].split_once(':').unwrap().0).to_string();
+            let size = (calculate_size(remaining_vec[8], remaining_vec[9]), calculate_size(remaining_vec[11], remaining_vec[12]));
+
+            date = merge_date(date);
+            target = group_domain(&target);
+            //add log to dict
+            if date != last_date{ //dump all records in dict, create new one
+                println!("{:?}", buf_dict);
+                buf_dict.clear();
+                last_date = date;
+            }
+            if buf_dict.contains_key(&user){
+                let proc: &mut LogGroup = buf_dict.get_mut(&user).unwrap();
+                proc.ips.insert(ip);
+                proc.targets.entry(target).and_modify(|x| {x.0 += size.0; x.1 += size.1;} ).or_insert(size);
+            }else{
+                buf_dict.insert(user, LogGroup{
+                    date,
+                    ips: {let mut tmp = HashSet::new(); tmp.insert(ip); tmp },
+                    targets: {let mut tmp = HashMap::new(); tmp.insert(target, size); tmp}
+                });
+            }
+
+        }else if line_str.starts_with("[WARNING"){ //WARNING
+            // add line to warning log
+            continue; //TODO: WARNING LOG redirection
+        }else{
+            continue; //ignore other logs
         }
-        let cap = cap_res.unwrap();
-        let mut date = Utc
-            .datetime_from_str(cap.get(1).unwrap().as_str(), "%Y/%m/%d %H:%M:%S")
-            .unwrap();
-        let user = parse_sha224(cap.get(2).unwrap().as_str());
-        let ip = cap.get(3).unwrap().as_str().parse::<Ipv4Addr>().unwrap();
-        let mut target = cap.get(4).unwrap().as_str().to_string();
-        let size = (calculate_size(cap.get(5).unwrap().as_str()), calculate_size(cap.get(6).unwrap().as_str()));
         // let mut log_line = LogData{
         //     date,
         //     user,
@@ -100,25 +127,7 @@ fn process_file() -> io::Result<()> {
         //     target,
         //     size
         // };
-        date = merge_date(date);
-        target = group_domain(&target);
-        //add log to dict
-        if date != last_date{ //dump all records in dict, create new one
-            println!("{:?}", buf_dict);
-            buf_dict.clear();
-            last_date = date;
-        }
-        if buf_dict.contains_key(&user){
-            let proc: &mut LogGroup = buf_dict.get_mut(&user).unwrap();
-            proc.ips.insert(ip);
-            proc.targets.entry(target).and_modify(|x| {x.0 += size.0; x.1 += size.1;} ).or_insert(size);
-        }else{
-            buf_dict.insert(user, LogGroup{
-                date,
-                ips: {let mut tmp = HashSet::new(); tmp.insert(ip); tmp },
-                targets: {let mut tmp = HashMap::new(); tmp.insert(target, size); tmp}
-            });
-        }
+
     }
     Ok(())
 }
@@ -135,20 +144,8 @@ fn group_domain(raw: &str) -> String {
     raw.to_string()
 }
 
-fn parse_sha224(raw: &str) -> [u8; 28] {
-    let mut raw_iter = raw.chars();
-    let mut ret = [0_u8; 28];
-    for i in 0..28 {
-        ret[i] = ((raw_iter.next().unwrap().to_digit(16).unwrap() << 4)
-            + raw_iter.next().unwrap().to_digit(16).unwrap()) as u8;
-    }
-    ret
-}
-
-fn calculate_size(raw: &str) -> u64{
-    //get unit
-    let eval: Vec<&str> = raw.split(' ').collect();
-    (eval[0].parse::<f64>().unwrap() * (match eval[1]{
+fn calculate_size(raw: &str, unit: &str) -> u64{
+    (raw.parse::<f64>().unwrap() * (match unit{
         "B" => 1,
         "KiB" => 1024,
         "MiB" => 1_048_576,
