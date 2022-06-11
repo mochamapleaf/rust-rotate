@@ -22,10 +22,11 @@ const MERGE_INTERVAL: u32 = 600; //Logs are regrouped into 10min blocks
 #[tokio::main]
 async fn main() -> core::result::Result<(), Box<dyn std::error::Error + Sync + Send + 'static>> {
     let args: Vec<String> = env::args().collect();
-    let LOG_LOCATION:&str = &args[1];
+    let service_node = &args[1];
+    let LOG_LOCATION:String = format!("/root/trojan-logs/{}/trojan.log",service_node);
     let my_client = MyClient::new().await?;
     let table = my_client.get_users().await?;
-    process_file(&table, LOG_LOCATION).unwrap();
+    process_file(&table, LOG_LOCATION.as_str(), service_node).unwrap();
 
     //println!("{}", get_public_ip().await?);
     Ok(())
@@ -188,7 +189,7 @@ fn merge_date(mut date: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 const MYSQL_URL: &str = "mysql://xinyu:Xiaoyao@localhost:3306/vpn_manager";
-fn process_file(user_table: &HashMap<GenericArray<u8,generic_array::typenum::U28>, (Uuid, String)>, log_location: &str) -> core::result::Result<(), Box<dyn std::error::Error + Sync + Send + 'static> > {
+fn process_file(user_table: &HashMap<GenericArray<u8,generic_array::typenum::U28>, (Uuid, String)>, log_location: &str, service_node: &str) -> core::result::Result<(), Box<dyn std::error::Error + Sync + Send + 'static> > {
     let f = File::open(log_location)?;
     let reader = BufReader::new(f);
     let mut counter = 0_u32;
@@ -241,7 +242,7 @@ fn process_file(user_table: &HashMap<GenericArray<u8,generic_array::typenum::U28
                             "up" => up,
                             "down" => down,
                             "ips" => log_group.ips.iter().map(|ip| format!("{:?}", ip)).collect::<Vec<_>>().join(", "),
-                            "service_node" => "tokyo"
+                            "service_node" => service_node
                         })
                     )?;
                     println!("Finished {:?}", log_group);
